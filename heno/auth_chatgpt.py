@@ -1,7 +1,11 @@
 from __future__ import annotations
 
 import base64
+import ctypes
+from ctypes import wintypes
 import hashlib
+import json
+import os
 import secrets
 import threading
 import time
@@ -11,49 +15,178 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 
 import jwt
-import keyring
 import requests
 
-from .config import Settings
+from .config import Settings, app_path
 
 AUTH_BASE = "https://auth.openai.com"
 AUTHORIZE_URL = f"{AUTH_BASE}/api/accounts/authorize"
 TOKEN_URL = f"{AUTH_BASE}/api/accounts/oauth/token"
 OIDC_CONFIG_URL = f"{AUTH_BASE}/.well-known/openid-configuration"
 RESOURCE = "https://api.openai.com/v1"
-SERVICE = "HENO-Meeting-Assistant"
 SCOPES = "openid profile email offline_access resource.invoke chatgpt.tokens.use.direct"
+CREDENTIALS_PATH = app_path("chatgpt_credentials.dat")
+CRYPTPROTECT_UI_FORBIDDEN = 0x01
 
 
 class ChatGPTAuthError(RuntimeError):
     pass
 
 
+class _DataBlob(ctypes.Structure):
+    _fields_ = [
+        ("cbData", wintypes.DWORD),
+        ("pbData", ctypes.POINTER(ctypes.c_byte)),
+    ]
+
+
+def _dpapi_protect(data: bytes) -> bytes:
+    """Encrypt bytes with Windows DPAPI for the current Windows user."""
+    if os.name != "nt":
+        raise ChatGPTAuthError("Le stockage sécurisé ChatGPT de HENO nécessite Windows.")
+
+    crypt32 = ctypes.WinDLL("Crypt32.dll", use_last_error=True)
+    kernel32 = ctypes.WinDLL("Kernel32.dll", use_last_error=True)
+
+    crypt32.CryptProtectData.argtypes = [
+        ctypes.POINTER(_DataBlob),
+        wintypes.LPCWSTR,
+        ctypes.POINTER(_DataBlob),
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+        wintypes.DWORD,
+        ctypes.POINTER(_DataBlob),
+    ]
+    crypt32.CryptProtectData.restype = wintypes.BOOL
+    kernel32.LocalFree.argtypes = [ctypes.c_void_p]
+    kernel32.LocalFree.restype = ctypes.c_void_p
+
+    raw = data or b""
+    in_buffer = (ctypes.c_byte * max(1, len(raw)))()
+    if raw:
+        ctypes.memmove(in_buffer, raw, len(raw))
+    in_blob = _DataBlob(len(raw), ctypes.cast(in_buffer, ctypes.POINTER(ctypes.c_byte)))
+    out_blob = _DataBlob()
+
+    ok = crypt32.CryptProtectData(
+        ctypes.byref(in_blob),
+        "HENO Meeting Assistant",
+        None,
+        None,
+        None,
+        CRYPTPROTECT_UI_FORBIDDEN,
+        ctypes.byref(out_blob),
+    )
+    if not ok:
+        raise ctypes.WinError(ctypes.get_last_error())
+
+    try:
+        return ctypes.string_at(out_blob.pbData, out_blob.cbData)
+    finally:
+        if out_blob.pbData:
+            kernel32.LocalFree(ctypes.cast(out_blob.pbData, ctypes.c_void_p))
+
+
+def _dpapi_unprotect(data: bytes) -> bytes:
+    """Decrypt bytes previously protected by _dpapi_protect."""
+    if os.name != "nt":
+        raise ChatGPTAuthError("Le stockage sécurisé ChatGPT de HENO nécessite Windows.")
+
+    crypt32 = ctypes.WinDLL("Crypt32.dll", use_last_error=True)
+    kernel32 = ctypes.WinDLL("Kernel32.dll", use_last_error=True)
+
+    crypt32.CryptUnprotectData.argtypes = [
+        ctypes.POINTER(_DataBlob),
+        ctypes.POINTER(wintypes.LPWSTR),
+        ctypes.POINTER(_DataBlob),
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+        wintypes.DWORD,
+        ctypes.POINTER(_DataBlob),
+    ]
+    crypt32.CryptUnprotectData.restype = wintypes.BOOL
+    kernel32.LocalFree.argtypes = [ctypes.c_void_p]
+    kernel32.LocalFree.restype = ctypes.c_void_p
+
+    raw = data or b""
+    if not raw:
+        return b""
+    in_buffer = (ctypes.c_byte * len(raw))()
+    ctypes.memmove(in_buffer, raw, len(raw))
+    in_blob = _DataBlob(len(raw), ctypes.cast(in_buffer, ctypes.POINTER(ctypes.c_byte)))
+    out_blob = _DataBlob()
+
+    ok = crypt32.CryptUnprotectData(
+        ctypes.byref(in_blob),
+        None,
+        None,
+        None,
+        None,
+        CRYPTPROTECT_UI_FORBIDDEN,
+        ctypes.byref(out_blob),
+    )
+    if not ok:
+        raise ctypes.WinError(ctypes.get_last_error())
+
+    try:
+        return ctypes.string_at(out_blob.pbData, out_blob.cbData)
+    finally:
+        if out_blob.pbData:
+            kernel32.LocalFree(ctypes.cast(out_blob.pbData, ctypes.c_void_p))
+
+
 class _CredentialStore:
+    """Store OAuth tokens in one DPAPI-encrypted local file.
+
+    Windows Credential Manager (CredWrite) has a relatively small credential
+    blob limit. OAuth/JWT tokens can exceed it, which caused HENO error 1783.
+    DPAPI keeps the file encrypted and bound to the current Windows user while
+    allowing larger token payloads.
+    """
+
     def __init__(self, settings: Settings):
         self.settings = settings
+        self.path = CREDENTIALS_PATH
 
     def _key(self, name: str) -> str:
         subject = self.settings.chatgpt_subject or self.settings.chatgpt_email or "default"
         return f"{subject}:{name}"
 
-    def get(self, name: str) -> str:
+    def _load_all(self) -> dict[str, str]:
+        if not self.path.exists():
+            return {}
         try:
-            return keyring.get_password(SERVICE, self._key(name)) or ""
+            clear = _dpapi_unprotect(self.path.read_bytes())
+            data = json.loads(clear.decode("utf-8"))
+            if isinstance(data, dict):
+                return {str(k): str(v) for k, v in data.items()}
         except Exception:
-            return ""
+            return {}
+        return {}
+
+    def _save_all(self, data: dict[str, str]) -> None:
+        payload = json.dumps(data, ensure_ascii=False).encode("utf-8")
+        encrypted = _dpapi_protect(payload)
+        tmp = self.path.with_suffix(".tmp")
+        tmp.write_bytes(encrypted)
+        os.replace(tmp, self.path)
+
+    def get(self, name: str) -> str:
+        return self._load_all().get(self._key(name), "")
 
     def set(self, name: str, value: str) -> None:
         if not value:
             return
-        keyring.set_password(SERVICE, self._key(name), value)
+        data = self._load_all()
+        data[self._key(name)] = value
+        self._save_all(data)
 
     def delete_all(self) -> None:
-        for name in ("access_token", "refresh_token", "id_token", "expires_at"):
-            try:
-                keyring.delete_password(SERVICE, self._key(name))
-            except Exception:
-                pass
+        try:
+            if self.path.exists():
+                self.path.unlink()
+        except Exception:
+            pass
 
 
 class ChatGPTAuthManager:
