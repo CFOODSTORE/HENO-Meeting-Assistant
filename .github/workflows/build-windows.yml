@@ -26,6 +26,10 @@ jobs:
           pip install -r requirements.txt
       - name: Validate Python source
         run: python -m compileall app.py heno
+      - name: Test Windows DPAPI token storage
+        shell: pwsh
+        run: |
+          python -c "from heno.auth_chatgpt import _dpapi_protect,_dpapi_unprotect; data=(b'HENO-test-token-'*1000); enc=_dpapi_protect(data); assert enc != data; assert _dpapi_unprotect(enc) == data; print('DPAPI OK')"
       - name: Build
         run: pyinstaller HENO.spec --noconfirm --clean
       - name: Zip application
@@ -36,16 +40,16 @@ jobs:
         with:
           name: HENO-Meeting-Assistant-Windows
           path: HENO-Meeting-Assistant-Windows.zip
-      - name: Publish or update v0.1.0 Release
+      - name: Publish or update v0.1.1 Release
         if: github.ref == 'refs/heads/main'
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          if (gh release view v0.1.0 2>$null) {
-            gh release upload v0.1.0 HENO-Meeting-Assistant-Windows.zip --clobber
+          if (gh release view v0.1.1 2>$null) {
+            gh release upload v0.1.1 HENO-Meeting-Assistant-Windows.zip --clobber
           } else {
-            gh release create v0.1.0 HENO-Meeting-Assistant-Windows.zip --target main --title "HENO v0.1.0" --notes "Première version Windows de HENO — Meeting Assistant."
+            gh release create v0.1.1 HENO-Meeting-Assistant-Windows.zip --target main --title "HENO v0.1.1" --notes "Correction Windows : stockage OAuth ChatGPT via DPAPI au lieu de Credential Manager/CredWrite (erreur 1783)."
           }
       - name: Publish tagged GitHub Release
         if: startsWith(github.ref, 'refs/tags/v')
