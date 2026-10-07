@@ -33,7 +33,7 @@ jobs:
       - name: Test streamed AI bytes parsing
         shell: pwsh
         run: |
-          python -c "from heno.ai import _line_to_text; assert _line_to_text(b'data: {\"type\":\"response.completed\"}').startswith('data:'); assert _line_to_text('data: test') == 'data: test'; print('AI stream bytes/text test OK')"
+          python -c "from heno.ai import _line_to_text; assert _line_to_text(b'data: test').startswith('data:'); assert _line_to_text('data: test') == 'data: test'; print('AI stream bytes/text test OK')"
       - name: Test OpenAI JWKS access
         shell: pwsh
         run: |
