@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import html
 import threading
+import traceback
 from pathlib import Path
 
 from PySide6.QtCore import QObject, Qt, Signal
@@ -25,7 +26,7 @@ from PySide6.QtWidgets import (
 )
 from docx import Document
 
-from .config import Settings
+from .config import Settings, app_path
 from .meeting import MeetingController, TranscriptItem
 
 
@@ -251,7 +252,11 @@ class MainWindow(QMainWindow):
                     pass
                 self.bridge.connected.emit(result.get("email") or "ChatGPT")
             except Exception as exc:
-                self.bridge.error.emit(str(exc))
+                try:
+                    app_path("heno-error.log").write_text(traceback.format_exc(), encoding="utf-8")
+                except Exception:
+                    pass
+                self.bridge.error.emit(f"{exc}\n\nJournal détaillé : %APPDATA%\\HENO-Meeting-Assistant\\heno-error.log")
             finally:
                 self.bridge.auth_finished.emit()
 
