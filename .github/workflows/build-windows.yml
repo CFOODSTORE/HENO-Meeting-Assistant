@@ -29,7 +29,11 @@ jobs:
       - name: Test Windows DPAPI token storage
         shell: pwsh
         run: |
-          python -c "from heno.auth_chatgpt import _dpapi_protect,_dpapi_unprotect; data=(b'HENO-test-token-'*1000); enc=_dpapi_protect(data); assert enc != data; assert _dpapi_unprotect(enc) == data; print('DPAPI OK')"
+          python -c "from heno.auth_chatgpt import _dpapi_protect,_dpapi_unprotect,_as_text; data=(b'HENO-test-token-'*1000); enc=_dpapi_protect(data); assert enc != data; assert _dpapi_unprotect(enc) == data; assert _as_text(b'abc') == 'abc'; print('OAuth storage/type tests OK')"
+      - name: Test OpenAI JWKS access
+        shell: pwsh
+        run: |
+          python -c "import requests; from heno.auth_chatgpt import JWKS_URL; r=requests.get(JWKS_URL,timeout=20); r.raise_for_status(); j=r.json(); assert j.get('keys'); print('OpenAI JWKS OK')"
       - name: Build
         run: pyinstaller HENO.spec --noconfirm --clean
       - name: Zip application
@@ -40,16 +44,16 @@ jobs:
         with:
           name: HENO-Meeting-Assistant-Windows
           path: HENO-Meeting-Assistant-Windows.zip
-      - name: Publish or update v0.1.1 Release
+      - name: Publish or update v0.1.2 Release
         if: github.ref == 'refs/heads/main'
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          if (gh release view v0.1.1 2>$null) {
-            gh release upload v0.1.1 HENO-Meeting-Assistant-Windows.zip --clobber
+          if (gh release view v0.1.2 2>$null) {
+            gh release upload v0.1.2 HENO-Meeting-Assistant-Windows.zip --clobber
           } else {
-            gh release create v0.1.1 HENO-Meeting-Assistant-Windows.zip --target main --title "HENO v0.1.1" --notes "Correction Windows : stockage OAuth ChatGPT via DPAPI au lieu de Credential Manager/CredWrite (erreur 1783)."
+            gh release create v0.1.2 HENO-Meeting-Assistant-Windows.zip --target main --title "HENO v0.1.2" --notes "Correction OAuth Windows : normalisation bytes/str, validation OIDC RSA directe et journal de diagnostic."
           }
       - name: Publish tagged GitHub Release
         if: startsWith(github.ref, 'refs/tags/v')
