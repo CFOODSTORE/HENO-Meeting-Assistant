@@ -3,14 +3,16 @@ from __future__ import annotations
 import html
 import threading
 import traceback
+from datetime import datetime
 from pathlib import Path
 
 from PySide6.QtCore import QObject, Qt, Signal
-from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
     QComboBox,
+    QDialog,
+    QDialogButtonBox,
     QFileDialog,
     QFrame,
     QHBoxLayout,
@@ -19,7 +21,6 @@ from PySide6.QtWidgets import (
     QMainWindow,
     QMessageBox,
     QPushButton,
-    QScrollArea,
     QTextEdit,
     QVBoxLayout,
     QWidget,
@@ -27,7 +28,7 @@ from PySide6.QtWidgets import (
 from docx import Document
 
 from .config import Settings, app_path
-from .meeting import MeetingController, TranscriptItem
+from .meeting import MeetingController, QAItem, TranscriptItem
 
 
 class Bridge(QObject):
@@ -35,6 +36,7 @@ class Bridge(QObject):
     question = Signal(str)
     answer = Signal(str)
     answer_delta = Signal(str)
+    qa_archived = Signal(object)
     status = Signal(str)
     error = Signal(str)
     connected = Signal(str)
@@ -51,25 +53,28 @@ class MainWindow(QMainWindow):
         self.bridge = Bridge()
         self._wire_backend()
         self.setWindowTitle("HENO — Meeting Assistant")
-        self.resize(1250, 760)
-        self.setMinimumSize(980, 640)
+        self.resize(1320, 820)
+        self.setMinimumSize(1050, 680)
         self.current_answer = ""
         self.current_summary = ""
         self._build_ui()
         self._apply_style()
         self._refresh_auth_state()
+        self._refresh_archive_count()
 
     def _wire_backend(self) -> None:
         self.controller.on_transcript = lambda item: self.bridge.transcript.emit(item)
         self.controller.on_question = lambda q: self.bridge.question.emit(q)
         self.controller.on_answer = lambda a: self.bridge.answer.emit(a)
         self.controller.on_answer_delta = lambda d: self.bridge.answer_delta.emit(d)
+        self.controller.on_qa_archived = lambda qa: self.bridge.qa_archived.emit(qa)
         self.controller.on_status = lambda s: self.bridge.status.emit(s)
         self.controller.on_error = lambda e: self.bridge.error.emit(e)
         self.bridge.transcript.connect(self._append_transcript)
         self.bridge.question.connect(self._show_question)
         self.bridge.answer.connect(self._finish_answer)
         self.bridge.answer_delta.connect(self._append_answer_delta)
+        self.bridge.qa_archived.connect(self._qa_archived)
         self.bridge.status.connect(self._set_status)
         self.bridge.error.connect(self._show_error)
         self.bridge.connected.connect(self._connected)
@@ -79,25 +84,29 @@ class MainWindow(QMainWindow):
 
     def _build_ui(self) -> None:
         root = QWidget()
+        root.setObjectName("root")
         outer = QHBoxLayout(root)
         outer.setContentsMargins(0, 0, 0, 0)
         outer.setSpacing(0)
 
         sidebar = QFrame()
         sidebar.setObjectName("sidebar")
-        sidebar.setFixedWidth(250)
+        sidebar.setFixedWidth(270)
         sl = QVBoxLayout(sidebar)
-        sl.setContentsMargins(22, 26, 22, 26)
-        sl.setSpacing(12)
+        sl.setContentsMargins(24, 28, 24, 24)
+        sl.setSpacing(10)
 
         logo = QLabel("HENO")
         logo.setObjectName("logo")
-        sub = QLabel("MEETING ASSISTANT")
+        sub = QLabel("MEETING NOTEBOOK")
         sub.setObjectName("subtitle")
         sl.addWidget(logo)
         sl.addWidget(sub)
-        sl.addSpacing(20)
+        sl.addSpacing(18)
 
+        chapter = QLabel("COMPTE")
+        chapter.setObjectName("chapter")
+        sl.addWidget(chapter)
         self.auth_button = QPushButton("Continuer avec ChatGPT")
         self.auth_button.clicked.connect(self.connect_chatgpt)
         sl.addWidget(self.auth_button)
@@ -106,8 +115,24 @@ class MainWindow(QMainWindow):
         self.auth_label.setObjectName("muted")
         sl.addWidget(self.auth_label)
 
-        sl.addSpacing(10)
-        sl.addWidget(QLabel("Transcription locale"))
+        sl.addSpacing(12)
+        chapter2 = QLabel("RÉUNION")
+        chapter2.setObjectName("chapter")
+        sl.addWidget(chapter2)
+
+        self.meeting_title = QLineEdit()
+        self.meeting_title.setPlaceholderText("Titre de la réunion")
+        sl.addWidget(self.meeting_title)
+
+        self.language_combo = QComboBox()
+        self.language_combo.addItem("Auto — Français / English", "auto")
+        self.language_combo.addItem("Français", "fr")
+        self.language_combo.addItem("English", "en")
+        idx = self.language_combo.findData(self.settings.language)
+        self.language_combo.setCurrentIndex(idx if idx >= 0 else 0)
+        self.language_combo.currentIndexChanged.connect(self._save_settings)
+        sl.addWidget(self.language_combo)
+
         self.model_combo = QComboBox()
         self.model_combo.addItems(["tiny", "base", "small", "medium"])
         self.model_combo.setCurrentText(self.settings.whisper_model)
@@ -123,17 +148,25 @@ class MainWindow(QMainWindow):
         sl.addWidget(self.mic_check)
         sl.addWidget(self.system_check)
 
-        self.docs_button = QPushButton("Ajouter des documents")
+        self.docs_button = QPushButton("Documents de contexte")
         self.docs_button.clicked.connect(self.add_documents)
         sl.addWidget(self.docs_button)
         self.docs_label = QLabel("0 document")
         self.docs_label.setObjectName("muted")
         sl.addWidget(self.docs_label)
+
+        sl.addSpacing(12)
+        chapter3 = QLabel("ARCHIVES")
+        chapter3.setObjectName("chapter")
+        sl.addWidget(chapter3)
+        self.archive_button = QPushButton("Questions & réponses")
+        self.archive_button.clicked.connect(self.show_archive)
+        sl.addWidget(self.archive_button)
+        self.archive_label = QLabel("0 question archivée")
+        self.archive_label.setObjectName("muted")
+        sl.addWidget(self.archive_label)
         sl.addStretch(1)
 
-        self.meeting_title = QLineEdit()
-        self.meeting_title.setPlaceholderText("Titre de la réunion")
-        sl.addWidget(self.meeting_title)
         self.summary_button = QPushButton("Générer le compte rendu")
         self.summary_button.clicked.connect(self.generate_summary)
         sl.addWidget(self.summary_button)
@@ -142,63 +175,103 @@ class MainWindow(QMainWindow):
         sl.addWidget(self.export_button)
 
         content = QWidget()
+        content.setObjectName("desk")
         cl = QVBoxLayout(content)
-        cl.setContentsMargins(24, 20, 24, 20)
-        cl.setSpacing(16)
+        cl.setContentsMargins(28, 22, 28, 26)
+        cl.setSpacing(15)
 
         top = QHBoxLayout()
+        title_wrap = QVBoxLayout()
+        book_title = QLabel("Carnet de réunion")
+        book_title.setObjectName("bookTitle")
+        book_subtitle = QLabel("Écouter · comprendre · répondre · archiver")
+        book_subtitle.setObjectName("bookSubtitle")
+        title_wrap.addWidget(book_title)
+        title_wrap.addWidget(book_subtitle)
+        top.addLayout(title_wrap)
+        top.addStretch(1)
         self.status_dot = QLabel("●")
         self.status_dot.setObjectName("statusDot")
         self.status_label = QLabel("Prêt")
-        self.status_label.setObjectName("muted")
+        self.status_label.setObjectName("statusText")
         top.addWidget(self.status_dot)
         top.addWidget(self.status_label)
-        top.addStretch(1)
         self.start_button = QPushButton("Démarrer la réunion")
         self.start_button.setObjectName("primary")
         self.start_button.clicked.connect(self.toggle_meeting)
         top.addWidget(self.start_button)
         cl.addLayout(top)
 
-        columns = QHBoxLayout()
-        columns.setSpacing(16)
+        pages = QHBoxLayout()
+        pages.setSpacing(18)
 
-        left_card = QFrame()
-        left_card.setObjectName("card")
-        left_layout = QVBoxLayout(left_card)
-        left_title = QLabel("Transcription en direct")
-        left_title.setObjectName("sectionTitle")
-        left_layout.addWidget(left_title)
+        left_page = QFrame()
+        left_page.setObjectName("paper")
+        ll = QVBoxLayout(left_page)
+        ll.setContentsMargins(26, 24, 26, 24)
+        page_no = QLabel("PAGE 01  ·  TRANSCRIPTION")
+        page_no.setObjectName("pageNo")
+        ll.addWidget(page_no)
+        left_title = QLabel("Ce qui se dit")
+        left_title.setObjectName("pageTitle")
+        ll.addWidget(left_title)
+        left_rule = QFrame()
+        left_rule.setObjectName("rule")
+        left_rule.setFixedHeight(1)
+        ll.addWidget(left_rule)
         self.transcript_view = QTextEdit()
+        self.transcript_view.setObjectName("manuscript")
         self.transcript_view.setReadOnly(True)
-        left_layout.addWidget(self.transcript_view)
+        self.transcript_view.setPlaceholderText("La transcription apparaîtra ici, comme des notes prises au fil de la réunion…")
+        ll.addWidget(self.transcript_view, 1)
 
-        right_card = QFrame()
-        right_card.setObjectName("card")
-        right_layout = QVBoxLayout(right_card)
-        right_title = QLabel("HENO — Réponse suggérée")
-        right_title.setObjectName("sectionTitle")
-        right_layout.addWidget(right_title)
+        right_page = QFrame()
+        right_page.setObjectName("paper")
+        rl = QVBoxLayout(right_page)
+        rl.setContentsMargins(26, 24, 26, 24)
+        page_no2 = QLabel("PAGE 02  ·  HENO")
+        page_no2.setObjectName("pageNo")
+        rl.addWidget(page_no2)
+        right_title = QLabel("Question & réponse proposée")
+        right_title.setObjectName("pageTitle")
+        rl.addWidget(right_title)
+        right_rule = QFrame()
+        right_rule.setObjectName("rule")
+        right_rule.setFixedHeight(1)
+        rl.addWidget(right_rule)
+
         qlabel = QLabel("QUESTION DÉTECTÉE")
-        qlabel.setObjectName("eyebrow")
-        right_layout.addWidget(qlabel)
+        qlabel.setObjectName("marginNote")
+        rl.addWidget(qlabel)
         self.question_view = QTextEdit()
+        self.question_view.setObjectName("noteBox")
         self.question_view.setReadOnly(True)
-        self.question_view.setMaximumHeight(150)
-        right_layout.addWidget(self.question_view)
-        alabel = QLabel("RÉPONSE")
-        alabel.setObjectName("eyebrow")
-        right_layout.addWidget(alabel)
-        self.answer_view = QTextEdit()
-        self.answer_view.setReadOnly(True)
-        right_layout.addWidget(self.answer_view)
-        self.copy_button = QPushButton("Copier la réponse")
-        self.copy_button.clicked.connect(self.copy_answer)
-        right_layout.addWidget(self.copy_button)
+        self.question_view.setMaximumHeight(160)
+        self.question_view.setPlaceholderText("Une question détectée apparaîtra ici.")
+        rl.addWidget(self.question_view)
 
-        columns.addWidget(left_card, 3)
-        columns.addWidget(right_card, 2)
-        cl.addLayout(columns, 1)
+        alabel = QLabel("RÉPONSE PROPOSÉE")
+        alabel.setObjectName("marginNote")
+        rl.addWidget(alabel)
+        self.answer_view = QTextEdit()
+        self.answer_view.setObjectName("noteBox")
+        self.answer_view.setReadOnly(True)
+        self.answer_view.setPlaceholderText("HENO proposera ici une formulation directement utilisable.")
+        rl.addWidget(self.answer_view, 1)
+
+        actions = QHBoxLayout()
+        self.copy_button = QPushButton("Copier")
+        self.copy_button.clicked.connect(self.copy_answer)
+        actions.addWidget(self.copy_button)
+        actions.addStretch(1)
+        self.session_archive_label = QLabel("0 Q&R dans cette réunion")
+        self.session_archive_label.setObjectName("muted")
+        actions.addWidget(self.session_archive_label)
+        rl.addLayout(actions)
+
+        pages.addWidget(left_page, 3)
+        pages.addWidget(right_page, 2)
+        cl.addLayout(pages, 1)
 
         outer.addWidget(sidebar)
         outer.addWidget(content, 1)
@@ -206,27 +279,39 @@ class MainWindow(QMainWindow):
 
     def _apply_style(self) -> None:
         self.setStyleSheet("""
-            QMainWindow, QWidget { background: #0b1220; color: #e8eef7; font-family: 'Segoe UI'; font-size: 14px; }
-            #sidebar { background: #101a2d; border-right: 1px solid #23304a; }
-            #logo { font-size: 32px; font-weight: 800; color: #5eead4; letter-spacing: 2px; }
-            #subtitle { color: #8fa1bb; font-size: 11px; letter-spacing: 2px; }
-            #muted { color: #8fa1bb; }
-            #statusDot { color: #5eead4; font-size: 16px; }
-            #card { background: #111c31; border: 1px solid #22314d; border-radius: 14px; }
-            #sectionTitle { font-size: 18px; font-weight: 700; }
-            #eyebrow { font-size: 11px; font-weight: 700; color: #5eead4; letter-spacing: 1px; margin-top: 6px; }
-            QTextEdit, QLineEdit, QComboBox { background: #0c1526; border: 1px solid #2b3c5d; border-radius: 9px; padding: 8px; color: #edf4ff; }
-            QPushButton { background: #1a2a45; border: 1px solid #304768; border-radius: 9px; padding: 10px 12px; color: #edf4ff; }
-            QPushButton:hover { background: #223755; }
-            QPushButton#primary { background: #14b8a6; color: #06120f; border: none; font-weight: 700; padding: 11px 16px; }
-            QPushButton#primary:hover { background: #2dd4bf; }
-            QCheckBox { spacing: 8px; }
+            #root, QMainWindow { background: #e8e3d9; }
+            QWidget { color: #2e2b27; font-family: 'Segoe UI'; font-size: 14px; }
+            #sidebar { background: #f1ede5; border-right: 1px solid #cfc7b9; }
+            #desk { background: #ddd7cc; }
+            #logo { font-family: 'Georgia'; font-size: 34px; font-weight: 700; color: #273c34; letter-spacing: 3px; }
+            #subtitle { color: #7f7669; font-size: 10px; letter-spacing: 2.5px; }
+            #chapter { color: #8c7760; font-size: 10px; font-weight: 700; letter-spacing: 1.8px; margin-top: 4px; }
+            #muted { color: #847c72; font-size: 12px; }
+            #bookTitle { font-family: 'Georgia'; font-size: 25px; font-weight: 700; color: #292621; }
+            #bookSubtitle { color: #7d7468; font-size: 12px; }
+            #statusDot { color: #4f7a68; font-size: 14px; }
+            #statusText { color: #665f56; margin-right: 8px; }
+            #paper { background: #fffdf8; border: 1px solid #cfc7b8; border-radius: 4px; }
+            #pageNo { color: #9b8d7d; font-size: 10px; letter-spacing: 1.6px; }
+            #pageTitle { font-family: 'Georgia'; font-size: 23px; font-weight: 700; color: #2f2a25; margin-bottom: 5px; }
+            #rule { background: #d8cfc0; border: none; margin-bottom: 8px; }
+            #marginNote { color: #8a735b; font-size: 10px; font-weight: 700; letter-spacing: 1.4px; margin-top: 8px; }
+            QTextEdit#manuscript { background: transparent; border: none; color: #36312c; font-family: 'Georgia'; font-size: 15px; line-height: 1.5; padding: 4px 2px; }
+            QTextEdit#noteBox { background: #faf6ed; border: 1px solid #ddd3c3; border-radius: 3px; color: #34302b; font-family: 'Georgia'; font-size: 14px; padding: 10px; }
+            QLineEdit, QComboBox { background: #fffdf8; border: 1px solid #c9c0b1; border-radius: 4px; padding: 8px; color: #332f2b; }
+            QComboBox::drop-down { border: none; width: 24px; }
+            QPushButton { background: #ebe5da; border: 1px solid #c8bfae; border-radius: 4px; padding: 9px 11px; color: #3d3832; }
+            QPushButton:hover { background: #e1d9cb; }
+            QPushButton#primary { background: #385f50; color: #fffdf8; border: 1px solid #385f50; font-weight: 700; padding: 11px 16px; }
+            QPushButton#primary:hover { background: #2e5144; }
+            QCheckBox { spacing: 8px; color: #514b44; }
         """)
 
     def _save_settings(self) -> None:
         if not hasattr(self, "model_combo"):
             return
         self.settings.whisper_model = self.model_combo.currentText()
+        self.settings.language = self.language_combo.currentData() or "auto"
         self.settings.use_microphone = self.mic_check.isChecked()
         self.settings.use_system_audio = self.system_check.isChecked()
         self.settings.save()
@@ -236,8 +321,14 @@ class MainWindow(QMainWindow):
             self.auth_label.setText(f"Connecté : {self.settings.chatgpt_email or 'ChatGPT'}")
             self.auth_button.setText("Reconnecter ChatGPT")
         else:
-            self.auth_label.setText("Non connecté — HENO utilisera Ollama si disponible")
+            self.auth_label.setText("Non connecté — Ollama sera utilisé s'il est disponible")
             self.auth_button.setText("Continuer avec ChatGPT")
+
+    def _refresh_archive_count(self) -> None:
+        count = len(self.controller.archive.list_records(limit=5000))
+        self.archive_label.setText(f"{count} question{'s' if count != 1 else ''} archivée{'s' if count != 1 else ''}")
+        session_count = len(self.controller.qa_history)
+        self.session_archive_label.setText(f"{session_count} Q&R dans cette réunion")
 
     def connect_chatgpt(self) -> None:
         self.auth_button.setEnabled(False)
@@ -269,13 +360,16 @@ class MainWindow(QMainWindow):
 
     def toggle_meeting(self) -> None:
         self._save_settings()
+        self.controller.meeting_title = self.meeting_title.text().strip()
         if not self.controller.running:
             try:
                 self.transcript_view.clear()
                 self.question_view.clear()
                 self.answer_view.clear()
                 self.current_answer = ""
+                self.current_summary = ""
                 self.controller.start()
+                self._refresh_archive_count()
                 self.start_button.setText("Arrêter la réunion")
             except Exception as exc:
                 self._show_error(str(exc))
@@ -297,10 +391,9 @@ class MainWindow(QMainWindow):
             self._set_status("Documents de contexte chargés")
 
     def _append_transcript(self, item: TranscriptItem) -> None:
-        color = "#5eead4" if item.source == "Moi" else "#93c5fd"
         self.transcript_view.append(
-            f"<span style='color:#7185a6'>{html.escape(item.time)}</span> "
-            f"<b style='color:{color}'>{html.escape(item.source)}</b> : {html.escape(item.text)}"
+            f"<span style='color:#9a8d7e'>{html.escape(item.time)}</span> "
+            f"<b>{html.escape(item.source)}</b> — {html.escape(item.text)}"
         )
 
     def _show_question(self, question: str) -> None:
@@ -319,16 +412,56 @@ class MainWindow(QMainWindow):
     def _finish_answer(self, answer: str) -> None:
         self.current_answer = answer
         self.answer_view.setPlainText(answer)
-        self._set_status("Réponse prête")
+        self._set_status("Réponse prête et archivée")
+
+    def _qa_archived(self, qa: QAItem) -> None:
+        self._refresh_archive_count()
 
     def copy_answer(self) -> None:
         QApplication.clipboard().setText(self.answer_view.toPlainText())
         self._set_status("Réponse copiée")
 
+    def show_archive(self) -> None:
+        records = self.controller.archive.list_records(limit=500)
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Archives HENO — Questions & réponses")
+        dialog.resize(820, 620)
+        layout = QVBoxLayout(dialog)
+        title = QLabel("Archives des questions et réponses proposées")
+        title.setObjectName("pageTitle")
+        layout.addWidget(title)
+        view = QTextEdit()
+        view.setReadOnly(True)
+        view.setObjectName("noteBox")
+        if not records:
+            view.setPlainText("Aucune question archivée pour le moment.")
+        else:
+            blocks = []
+            for record in reversed(records):
+                when = record.get("asked_at", "")
+                try:
+                    when = datetime.fromisoformat(when.replace("Z", "+00:00")).strftime("%d/%m/%Y %H:%M")
+                except Exception:
+                    pass
+                blocks.append(
+                    f"{record.get('meeting_title') or 'Réunion sans titre'}  ·  {when}\n"
+                    f"QUESTION\n{record.get('question', '')}\n\n"
+                    f"RÉPONSE HENO\n{record.get('answer', '')}\n"
+                    + ("─" * 70)
+                )
+            view.setPlainText("\n\n".join(blocks))
+        layout.addWidget(view, 1)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
+        buttons.rejected.connect(dialog.reject)
+        buttons.accepted.connect(dialog.accept)
+        layout.addWidget(buttons)
+        dialog.exec()
+
     def generate_summary(self) -> None:
         if not self.controller.transcript:
             self._show_error("Aucune transcription disponible.")
             return
+        self.controller.meeting_title = self.meeting_title.text().strip()
         self.summary_button.setEnabled(False)
         self._set_status("Génération du compte rendu…")
 
@@ -346,11 +479,23 @@ class MainWindow(QMainWindow):
     def _summary_ready(self, summary: str) -> None:
         self.current_summary = summary
         self._set_status("Compte rendu prêt")
-        box = QMessageBox(self)
-        box.setWindowTitle("Compte rendu HENO")
-        box.setText("Le compte rendu a été généré. Utilisez « Exporter Word » pour le sauvegarder.")
-        box.setDetailedText(summary)
-        box.exec()
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Compte rendu HENO")
+        dialog.resize(760, 620)
+        layout = QVBoxLayout(dialog)
+        title = QLabel("Compte rendu de réunion")
+        title.setObjectName("pageTitle")
+        layout.addWidget(title)
+        view = QTextEdit()
+        view.setReadOnly(True)
+        view.setObjectName("noteBox")
+        view.setPlainText(summary)
+        layout.addWidget(view, 1)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
+        buttons.rejected.connect(dialog.reject)
+        buttons.accepted.connect(dialog.accept)
+        layout.addWidget(buttons)
+        dialog.exec()
 
     def export_word(self) -> None:
         if not self.controller.transcript and not self.current_summary:
@@ -363,11 +508,25 @@ class MainWindow(QMainWindow):
         doc = Document()
         doc.add_heading(self.meeting_title.text().strip() or "Compte rendu de réunion", level=0)
         doc.add_paragraph("Généré avec HENO — Meeting Assistant")
+        lang_label = {"fr": "Français", "en": "English", "auto": "Auto FR/EN"}.get(self.settings.language, "Auto FR/EN")
+        doc.add_paragraph(f"Mode de transcription : {lang_label}")
+
         if self.current_summary:
-            doc.add_heading("Synthèse", level=1)
+            doc.add_heading("Compte rendu structuré", level=1)
             for line in self.current_summary.splitlines():
                 if line.strip():
                     doc.add_paragraph(line.strip())
+
+        if self.controller.qa_history:
+            doc.add_heading("Questions et réponses proposées par HENO", level=1)
+            for index, qa in enumerate(self.controller.qa_history, 1):
+                p = doc.add_paragraph()
+                p.add_run(f"Question {index} : ").bold = True
+                p.add_run(qa.question)
+                p2 = doc.add_paragraph()
+                p2.add_run("Réponse proposée : ").bold = True
+                p2.add_run(qa.answer)
+
         doc.add_heading("Transcription", level=1)
         for item in self.controller.transcript:
             p = doc.add_paragraph()
