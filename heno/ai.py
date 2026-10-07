@@ -22,6 +22,17 @@ class ModelInfo:
     display_name: str
 
 
+def _line_to_text(raw_line: bytes | str) -> str:
+    """Normalize streamed HTTP lines to text.
+
+    requests.iter_lines(decode_unicode=True) may still yield bytes when the
+    response does not expose an encoding. HENO always parses SSE as UTF-8 text.
+    """
+    if isinstance(raw_line, bytes):
+        return raw_line.decode("utf-8", errors="replace")
+    return str(raw_line)
+
+
 class ChatGPTProvider:
     def __init__(self, settings: Settings, auth: ChatGPTAuthManager):
         self.settings = settings
@@ -68,6 +79,7 @@ class ChatGPTProvider:
             headers={
                 "Authorization": f"Bearer {token}",
                 "Content-Type": "application/json",
+                "Accept": "text/event-stream",
             },
             json=payload,
             stream=True,
@@ -78,10 +90,13 @@ class ChatGPTProvider:
 
         text_parts: list[str] = []
         completed = False
-        for raw_line in response.iter_lines(decode_unicode=True):
-            if not raw_line or not raw_line.startswith("data:"):
+        for raw_line in response.iter_lines(decode_unicode=False):
+            if not raw_line:
                 continue
-            data = raw_line[5:].strip()
+            line = _line_to_text(raw_line).strip()
+            if not line.startswith("data:"):
+                continue
+            data = line[5:].strip()
             if data == "[DONE]":
                 break
             try:
@@ -91,6 +106,8 @@ class ChatGPTProvider:
             etype = event.get("type")
             if etype == "response.output_text.delta":
                 delta = event.get("delta", "")
+                if not isinstance(delta, str):
+                    delta = str(delta)
                 text_parts.append(delta)
                 if on_delta:
                     on_delta(delta)
@@ -98,7 +115,7 @@ class ChatGPTProvider:
                 error = ((event.get("response") or {}).get("error") or {})
                 code = error.get("code", "unknown_error")
                 message = error.get("message") or code
-                raise AIError(message)
+                raise AIError(str(message))
             elif etype == "response.completed":
                 completed = True
         if not completed and not text_parts:
@@ -135,12 +152,15 @@ class OllamaProvider:
         )
         response.raise_for_status()
         parts: list[str] = []
-        for line in response.iter_lines(decode_unicode=True):
-            if not line:
+        for raw_line in response.iter_lines(decode_unicode=False):
+            if not raw_line:
                 continue
+            line = _line_to_text(raw_line)
             event = json.loads(line)
             delta = event.get("response", "")
             if delta:
+                if not isinstance(delta, str):
+                    delta = str(delta)
                 parts.append(delta)
                 if on_delta:
                     on_delta(delta)
