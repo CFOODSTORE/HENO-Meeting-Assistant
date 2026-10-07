@@ -15,7 +15,8 @@ CONFIG_PATH = APP_DIR / "config.json"
 @dataclass
 class Settings:
     whisper_model: str = "base"
-    language: str = "fr"
+    # Supported values: auto, fr, en
+    language: str = "auto"
     use_microphone: bool = True
     use_system_audio: bool = True
     audio_chunk_seconds: int = 5
@@ -26,6 +27,10 @@ class Settings:
     chatgpt_subject: str = ""
     chatgpt_model: str = ""
     ext_agent_host_id: str = ""
+    # Product account foundation. This is local for now; it will later be
+    # synchronized with the HENO backend when commercial accounts are enabled.
+    account_email: str = ""
+    auto_email_report: bool = True
 
     @classmethod
     def load(cls) -> "Settings":
@@ -37,6 +42,8 @@ class Settings:
                 settings = cls()
         else:
             settings = cls()
+        if settings.language not in {"auto", "fr", "en"}:
+            settings.language = "auto"
         if not settings.ext_agent_host_id:
             settings.ext_agent_host_id = f"urn:uuid:{uuid.uuid4()}"
             settings.save()
