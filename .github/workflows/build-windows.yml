@@ -30,6 +30,10 @@ jobs:
         shell: pwsh
         run: |
           python -c "from heno.auth_chatgpt import _dpapi_protect,_dpapi_unprotect,_as_text; data=(b'HENO-test-token-'*1000); enc=_dpapi_protect(data); assert enc != data; assert _dpapi_unprotect(enc) == data; assert _as_text(b'abc') == 'abc'; print('OAuth storage/type tests OK')"
+      - name: Test streamed AI bytes parsing
+        shell: pwsh
+        run: |
+          python -c "from heno.ai import _line_to_text; assert _line_to_text(b'data: {\"type\":\"response.completed\"}').startswith('data:'); assert _line_to_text('data: test') == 'data: test'; print('AI stream bytes/text test OK')"
       - name: Test OpenAI JWKS access
         shell: pwsh
         run: |
@@ -44,16 +48,16 @@ jobs:
         with:
           name: HENO-Meeting-Assistant-Windows
           path: HENO-Meeting-Assistant-Windows.zip
-      - name: Publish or update v0.1.2 Release
+      - name: Publish or update v0.1.3 Release
         if: github.ref == 'refs/heads/main'
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          if (gh release view v0.1.2 2>$null) {
-            gh release upload v0.1.2 HENO-Meeting-Assistant-Windows.zip --clobber
+          if (gh release view v0.1.3 2>$null) {
+            gh release upload v0.1.3 HENO-Meeting-Assistant-Windows.zip --clobber
           } else {
-            gh release create v0.1.2 HENO-Meeting-Assistant-Windows.zip --target main --title "HENO v0.1.2" --notes "Correction OAuth Windows : normalisation bytes/str, validation OIDC RSA directe et journal de diagnostic."
+            gh release create v0.1.3 HENO-Meeting-Assistant-Windows.zip --target main --title "HENO v0.1.3" --notes "Correction du flux ChatGPT : conversion explicite bytes/str pour la génération de réponses et comptes rendus."
           }
       - name: Publish tagged GitHub Release
         if: startsWith(github.ref, 'refs/tags/v')
